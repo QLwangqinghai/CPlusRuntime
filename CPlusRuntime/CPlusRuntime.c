@@ -8,11 +8,125 @@
 
 #include "CPlusRuntimePrivate.h"
 
-static CPMemoryManager_t _CPMemoryManagerDefault = {};
 
 CPMemoryManager_t * _Nonnull CPMemoryManagerDefault(void) {
-    return &_CPMemoryManagerDefault;
+    return &__CPMemoryManagerDefault;
 }
+void CPMemoryManagerLoggerDeinit(void const * _Nonnull object) {
+    CPMemoryManagerLogger_o * logger  = (CPMemoryManagerLogger_o *)object;
+    if (logger->context) {
+        logger->contextRelease(logger->context);
+    }
+}
+CPMemoryUsedInfo_s CPMemoryUsedInfo(void) {
+    CPMemoryUsedInfo_s i = {};
+    i.ptrCount = CPGetFast64(&(CPMemoryManagerDefault()->ptrCount));
+    i.usedMemory = CPGetFast64(&(CPMemoryManagerDefault()->usedMemory));
+    return i;
+}
+
+
+// 0 NUll; 1 prepare; 2 active
+int CPMemoryManagerAddLogger(CPMemoryManager_t * _Nonnull manager, CPMemoryManagerLoggerRef _Nonnull logger) {
+    assert(manager);
+    assert(logger);
+    CPObject v = CPRetain(logger);
+    
+    int bitIndex = -1;
+    if (v) {
+        uint64_t flags = CPGetFast64(&(manager->loggerFlags));
+        uint64_t activeMask = 0x1;
+        for (int i=0; i<64; i++) {
+            uint64_t offset = i;
+            uint64_t flag = (activeMask << offset);
+            if ((flags & flag) == 0) {
+                CPMemoryManagerLoggerContainer_s * container = &(manager->loggerItems[i]);
+                int setInitFlagResult = 1;
+#if CPTARGET_RT_64_BIT
+                uint64_t refrenceCount = 0;
+                uint64_t newRefrenceCount = 1;
+#else
+                uint32_t refrenceCount = 0;
+                uint32_t newRefrenceCount = 1;
+#endif
+                do {
+                    refrenceCount = atomic_load(&(container->refrenceCount));
+                    if (refrenceCount != 0) {
+                        setInitFlagResult = 0;
+                        break;
+                    }
+                } while(!CPCASSetFast64(&(container->refrenceCount), refrenceCount, newRefrenceCount));
+                
+                
+                if (setInitFlagResult >= 1) {
+                    bitIndex = i;
+                    break;
+                }
+            }
+        }
+        if (bitIndex < 0) {
+            CPRelease(logger);
+            return 0;
+        }
+        uint64_t activeMask = 0x1;
+        uint64_t mask = activeMask << bitIndex;
+        
+        do {
+            flags = CPGetFast64(&(manager->loggerFlags));
+            newFlags = flags | mask;
+        } while(!CPCASSetFast64(&(manager->loggerFlags), flags, newFlags));
+
+        uintptr_t obj = (uintptr_t)logger;
+        
+        CPMemoryManagerLoggerContainer_s * container = &(manager->loggerItems[bitIndex]);
+        atomic_store(&(container->logger), logger);
+        CPMemoryBarrier();
+        atomic_store(&(container->refrenceCount), 2);
+        return bitIndex + 1;
+    } else {
+        return -1;
+    }
+}
+
+// |4|4|4|4|4|4|
+int CPMemoryManagerRemoveLogger(CPMemoryManager_t * _Nonnull manager, int key) {
+    assert(manager);
+    
+    if (key <= 0) {
+        return -1;
+    }
+
+//    CPObject v = CPRetain(logger);
+//    if (v) {
+//        int bitIndex = -1;
+//        uint64_t flags = 0;
+//        uint64_t newFlags = flags;
+//
+//        do {
+//            flags = CPGetFast64(&(CPMemoryManagerDefault()->loggerFlags));
+//            newFlags = flags;
+//            bitIndex = -1;
+//            uint64_t mask = 1;
+//            for (int i=0; i<64; i++) {
+//                uint64_t flag = mask << i;
+//                if ((flags & flag) != flag) {
+//                    bitIndex = i;
+//                    newFlags = flags | flag;
+//                }
+//            }
+//            if (bitIndex < 0) {
+//                CPRelease(logger);
+//                return 1;
+//            }
+//        } while(!CPCASSetFast64(&(CPMemoryManagerDefault()->loggerFlags), flags, newFlags));
+//        uintptr_t obj = (uintptr_t)logger;
+//        atomic_store(&(CPMemoryManagerDefault()->loggers[bitIndex]), obj);
+//        return 0;
+//    } else {
+//        return -1;
+//    }
+}
+
 
 
 CPAllocedMemory_s CPBaseAlloc(struct __CPAlloctor const * _Nonnull alloctor, size_t size) {

@@ -13,6 +13,113 @@
 #include <stdlib.h>
 #include <pthread/pthread.h>
 
+typedef void (* CPMemoryManagerLogFunc)(void * _Nonnull ptr, size_t size);
+
+typedef struct {
+    void * _Nullable context;
+    void (* _Nullable contextRelease)(void * _Nonnull context);//context 非空时调用
+
+    CPMemoryManagerLogFunc _Nonnull logFunc;
+    uint32_t const contentSize;
+} CPMemoryManagerLogger_o;
+
+typedef CPMemoryManagerLogger_o const * CPMemoryManagerLoggerRef;
+
+void CPMemoryManagerLoggerDeinit(void const * _Nonnull object);
+
+static CPTypeLayout_s const CPTypeStorage_CPMemoryManagerLogger = {
+    .info = CPInfoDefaultTypeInfo,
+    .type = {
+        .base = {
+            .isImmutable = 1,
+            .domain = CCTypeDomain,
+            .contentHasPadding = 0,
+            .customInfoSize = 0,
+            .contentBaseSize = sizeof(CPMemoryManagerLogger_o),
+            .name = "CPMemoryManagerLogger",
+            .superType = NULL,
+            .alloctor = NULL,
+            .deinit = CPMemoryManagerLoggerDeinit,
+        },
+        .callbacks = NULL,
+        .context = NULL,
+    },
+};
+
+
+typedef struct __CPMemoryManagerLoggerContainer {
+#if CPTARGET_RT_64_BIT
+    _Atomic(uint_fast64_t) refrenceCount;
+#else
+    _Atomic(uint_fast32_t) refrenceCount;
+#endif
+    _Atomic(uintptr_t) logger;
+} CPMemoryManagerLoggerContainer_s;
+
+typedef struct __CPMemoryManager {
+    _Atomic(uint_fast64_t) ptrCount;
+    _Atomic(uint_fast64_t) usedMemory;
+    void (* _Nullable zeroSizeErrorHandler)(struct __CPMemoryManager * _Nonnull manager, void * _Nonnull * _Nullable ptr);
+    void (* _Nullable oomHandler)(struct __CPMemoryManager * _Nonnull manager, size_t size);
+    _Atomic(uint_fast64_t) loggerFlags;
+    CPMemoryManagerLoggerContainer_s loggerItems[64];
+} CPMemoryManager_t;
+
+static CPMemoryManager_t __CPMemoryManagerDefault = {};
+
+CPMemoryManager_t * _Nonnull CPMemoryManagerDefault(void);
+
+//return < 0 for error, 0 for failure, [1, 64] for key
+int CPMemoryManagerAddLogger(CPMemoryManager_t * _Nonnull manager, CPMemoryManagerLoggerRef _Nonnull logger);
+
+
+static inline uint64_t CPGetFast64(_Atomic(uint_fast64_t) * _Nonnull ptr) {
+    assert(ptr);
+    return atomic_load(ptr);
+}
+static inline _Bool CPCASSetFast64(_Atomic(uint_fast64_t) * _Nonnull ptr, uint64_t oldValue, uint64_t newValue) {
+    assert(ptr);
+    
+    return atomic_compare_exchange_weak(ptr, &oldValue, newValue);
+}
+
+static inline void __CPAdd(size_t size) {
+    uint64_t oldSize = 0;
+    uint64_t newSize = 0;
+    _Atomic(uint_fast64_t) * sizePtr = &(CPMemoryManagerDefault()->usedMemory);
+    do {
+        oldSize = CPGetFast64(sizePtr);
+        newSize = oldSize + size;
+    } while(!(CPCASSetFast64(sizePtr, oldSize, newSize)));
+    
+    uint64_t oldPtrCount = 0;
+    uint64_t newPtrCount = 0;
+    _Atomic(uint_fast64_t) * ptrCountPtr = &(CPMemoryManagerDefault()->ptrCount);
+    do {
+        oldPtrCount = CPGetFast64(ptrCountPtr);
+        newPtrCount = oldPtrCount + 1;
+    } while(!(CPCASSetFast64(ptrCountPtr, oldPtrCount, newPtrCount)));
+}
+static inline void __CPRemove(size_t size) {
+    uint64_t oldSize = 0;
+    uint64_t newSize = 0;
+    _Atomic(uint_fast64_t) * sizePtr = &(CPMemoryManagerDefault()->usedMemory);
+    do {
+        oldSize = CPGetFast64(sizePtr);
+        newSize = oldSize - size;
+    } while(!(CPCASSetFast64(sizePtr, oldSize, newSize)));
+    
+    uint64_t oldPtrCount = 0;
+    uint64_t newPtrCount = 0;
+    _Atomic(uint_fast64_t) * ptrCountPtr = &(CPMemoryManagerDefault()->ptrCount);
+    do {
+        oldPtrCount = CPGetFast64(ptrCountPtr);
+        newPtrCount = oldPtrCount - 1;
+    } while(!(CPCASSetFast64(ptrCountPtr, oldPtrCount, newPtrCount)));
+}
+
+
+
 static inline void * _Nullable CBaseAlloc(size_t size) {
     void * ptr = NULL;
     
@@ -24,15 +131,11 @@ static inline void * _Nullable CBaseAlloc(size_t size) {
     if (NULL != ptr) {
         __CPAdd(size);
     }
-    printf("alloc %p\n", ptr);
-    
     return ptr;
 }
 
 static inline void CBaseFree(void * _Nonnull obj, size_t size) {
     assert(obj);
-    printf("cfree %p\n", obj);
-
     free(obj);
     __CPRemove(size);
 }

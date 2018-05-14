@@ -701,22 +701,12 @@ static inline size_t CPAlignContentSize(size_t size) {
     return result;
 }
 
-
-typedef struct __CPMemoryManager {
+typedef struct __CPMemoryUsedInfo {
     uint64_t ptrCount;
     uint64_t usedMemory;
-    void (* _Nullable zeroSizeErrorHandler)(struct __CPMemoryManager * _Nonnull manager, void * _Nonnull * _Nullable ptr);
-    void (* _Nullable oomHandler)(struct __CPMemoryManager * _Nonnull manager, size_t size);
-} CPMemoryManager_t;
-CPMemoryManager_t * _Nonnull CPMemoryManagerDefault(void);
+} CPMemoryUsedInfo_s;
 
-
-static inline void __CPAdd(size_t size) {
-    
-}
-static inline void __CPRemove(size_t size) {
-    
-}
+CPMemoryUsedInfo_s CPMemoryUsedInfo(void);
 
 
 CPAllocedMemory_s CPBaseAlloc(struct __CPAlloctor const * _Nonnull alloctor, size_t size);
