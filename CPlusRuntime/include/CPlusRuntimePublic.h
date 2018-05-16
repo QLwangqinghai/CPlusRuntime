@@ -314,7 +314,7 @@ typedef struct {
 
 #pragma pack(pop)
 
-static char const * _Nonnull const CPTypeNameType = "Type";
+static char const * _Nonnull const CPTypeNameType = "CPlusLanguage.Type";
 static CPTypeLayout_s const CPTypeStorage_Type = {
 #if CPMemoryHeaderAligent64
     .info = {
@@ -671,19 +671,39 @@ size_t CPGetStoreSize(void * _Nonnull obj);
 CPInfoStorage_s * _Nonnull CPGetInfo(void const * _Nonnull obj);
 
 
+
+typedef struct __CPMemoryFlag {
+    uint32_t action: 8;//0 for unknown, 1 for call malloc(size_t), 2. alloc form alloctor cache, 3. free 4. free by store to alloctor cache
+    uint32_t code: 24;
+} CPMemoryFlag_s;
+
 typedef struct __CPAllocedMemory {
+    CPMemoryFlag_s flag;
     void * _Nonnull ptr;
     size_t size;
 } CPAllocedMemory_s;
 
-typedef struct __CPAlloctor {
-    CPAllocedMemory_s (* _Nonnull memoryAlloc)(struct __CPAlloctor const * _Nonnull alloctor, size_t size);
-    void (* _Nonnull memoryDealloc)(struct __CPAlloctor const * _Nonnull alloctor, void * _Nonnull ptr, size_t size);
+typedef struct {
+    void * _Nonnull ptr;
+    void * _Nullable customInfo;
+    size_t customInfoSize;
+    CPInfoStorage_s * _Nonnull infoStorage;
+    size_t contentSizeInActiveInfo;
+    void * _Nonnull obj;
+    size_t size;
+} CPAllocResult_s;
 
-//    CPAllocedMemory_s (* _Nonnull alloc)(struct __CPAlloctor const * _Nonnull alloctor, CPType _Nonnull type, size_t contentPaddingSize);
-//    CPObject _Nonnull (* _Nonnull init)(CPAllocedMemory_s memory, _Bool autoDealloc, _Bool isStatic);
+typedef struct __CPAlloctor {
+    //memory
+    CPAllocedMemory_s (* _Nonnull memoryAlloc)(struct __CPAlloctor const * _Nonnull alloctor, size_t size);
+    CPMemoryFlag_s (* _Nonnull memoryDealloc)(struct __CPAlloctor const * _Nonnull alloctor, void * _Nonnull ptr, size_t size);
+    
+    
+    CPAllocResult_s const (* _Nonnull alloc)(struct __CPAlloctor const * _Nonnull alloctor, CPType _Nonnull type, size_t contentPaddingSize);
+    void * _Nonnull (* _Nonnull init)(struct __CPAlloctor const * _Nonnull alloctor, CPAllocResult_s * _Nonnull allocedInfo, _Bool autoDealloc, _Bool isStatic);
     void * _Nonnull (* _Nonnull allocInit)(struct __CPAlloctor const * _Nonnull alloctor, CPType _Nonnull type, size_t contentMutableSize, _Bool autoDealloc, _Bool isStatic);
     void (* _Nonnull dealloc)(struct __CPAlloctor const * _Nonnull alloctor, CPObject _Nonnull obj);
+    _Atomic(uintptr_t) loggerManager;
     void * _Nullable context;
 } CPAlloctor_s;
 
@@ -709,14 +729,25 @@ typedef struct __CPMemoryUsedInfo {
 CPMemoryUsedInfo_s CPMemoryUsedInfo(void);
 
 
-CPAllocedMemory_s CPBaseAlloc(struct __CPAlloctor const * _Nonnull alloctor, size_t size);
-void CPBaseDealloc(struct __CPAlloctor const * _Nonnull alloctor, void * _Nonnull ptr, size_t size);
-void * _Nonnull CPAllocInit(struct __CPAlloctor const * _Nonnull alloctor, CPType _Nonnull type, size_t contentPaddingSize, _Bool autoDealloc, _Bool isStatic);
-CPAllocedMemory_s CPAlloc(struct __CPAlloctor const * _Nonnull alloctor, CPType _Nonnull type, size_t contentPaddingSize);
-void * _Nonnull CPInit(void * _Nonnull ptr, CPType _Nonnull type, size_t contentPaddingSize, _Bool autoDealloc, _Bool isStatic);
 
+CPAllocedMemory_s const CPBaseAlloc(struct __CPAlloctor const * _Nonnull alloctor, size_t size);
+CPMemoryFlag_s const CPBaseDealloc(struct __CPAlloctor const * _Nonnull alloctor, void * _Nonnull ptr, size_t size);
 
+CPAllocResult_s const CPAlloc(struct __CPAlloctor const * _Nonnull alloctor, CPType _Nonnull type, size_t contentPaddingSize);
+void * _Nonnull CPInit(struct __CPAlloctor const * _Nonnull alloctor, CPAllocResult_s * _Nonnull allocedInfo, _Bool autoDealloc, _Bool isStatic);
 void CPDealloc(struct __CPAlloctor const * _Nonnull alloctor, CPObject _Nonnull obj);
+void * _Nonnull CPAllocInit(struct __CPAlloctor const * _Nonnull alloctor, CPType _Nonnull type, size_t contentPaddingSize, _Bool autoDealloc, _Bool isStatic);
+
+CPAllocedMemory_s CPMemoryAlloc(struct __CPAlloctor const * _Nonnull alloctor, size_t size);
+CPAllocedMemory_s CPMemoryDealloc(struct __CPAlloctor const * _Nonnull alloctor, size_t size);
+
+
+
+
+
+
+
+
 
 
 

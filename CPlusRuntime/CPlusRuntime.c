@@ -13,7 +13,7 @@ CPMemoryManager_t * _Nonnull CPMemoryManagerDefault(void) {
     return &__CPMemoryManagerDefault;
 }
 void CPMemoryManagerLoggerDeinit(void const * _Nonnull object) {
-    CPMemoryManagerLogger_o * logger  = (CPMemoryManagerLogger_o *)object;
+    CPMemoryLogger_o * logger  = (CPMemoryLogger_o *)object;
     if (logger->context) {
         logger->contextRelease(logger->context);
     }
@@ -25,9 +25,42 @@ CPMemoryUsedInfo_s CPMemoryUsedInfo(void) {
     return i;
 }
 
+CPMemoryManager_t * _Nonnull CPMemoryManagerAllocInit() {
+    return NULL;
+}
 
+
+int CPMemoryManagerAddLogger(CPAlloctor_s * _Nonnull alloctor, CPMemoryLoggerRef _Nonnull logger) {
 // 0 NUll; 1 prepare; 2 active
-int CPMemoryManagerAddLogger(CPMemoryManager_t * _Nonnull manager, CPMemoryManagerLoggerRef _Nonnull logger) {
+    assert(alloctor);
+    
+    uintptr_t oldLoggerManager = 0;
+    uintptr_t newLoggerManager = 0;
+    
+    CPMemoryManager_t * manager = NULL;
+    CPMemoryManager_t * tmpManager = NULL;
+
+    do {
+        oldLoggerManager = atomic_load(&(alloctor->loggerManager));
+        if (0 == oldLoggerManager) {
+            if (NULL == tmpManager) {
+                tmpManager = CPMemoryManagerAllocInit();
+            }
+            newLoggerManager = (uintptr_t)tmpManager;
+        } else {
+            manager = (CPMemoryManager_t *)oldLoggerManager;
+            if (tmpManager) {
+                CPRelease(tmpManager);
+                tmpManager = NULL;
+            }
+            
+            goto afterGetManager;
+        }
+    } while(!(atomic_compare_exchange_weak(&(alloctor->loggerManager), &oldLoggerManager, newLoggerManager)));
+    manager = tmpManager;
+    
+afterGetManager:
+    
     assert(manager);
     assert(logger);
     CPObject v = CPRetain(logger);
@@ -68,18 +101,25 @@ int CPMemoryManagerAddLogger(CPMemoryManager_t * _Nonnull manager, CPMemoryManag
             CPRelease(logger);
             return 0;
         }
-        uint64_t activeMask = 0x1;
         uint64_t mask = activeMask << bitIndex;
-        
+        uint64_t newFlags = flags;
+
         do {
             flags = CPGetFast64(&(manager->loggerFlags));
+            
+#if DEBUG
+            if ((flags & (~mask)) != flags) {
+                abort();
+            }
+#endif
+            
             newFlags = flags | mask;
         } while(!CPCASSetFast64(&(manager->loggerFlags), flags, newFlags));
 
         uintptr_t obj = (uintptr_t)logger;
         
         CPMemoryManagerLoggerContainer_s * container = &(manager->loggerItems[bitIndex]);
-        atomic_store(&(container->logger), logger);
+        atomic_store(&(container->logger), obj);
         CPMemoryBarrier();
         atomic_store(&(container->refrenceCount), 2);
         return bitIndex + 1;
@@ -88,48 +128,158 @@ int CPMemoryManagerAddLogger(CPMemoryManager_t * _Nonnull manager, CPMemoryManag
     }
 }
 
-// |4|4|4|4|4|4|
+enum CPMemoryManagerLoggerReferenceCountAddResult {
+    CPMemoryManagerLoggerReferenceCountAddResultSuccess,
+    CPMemoryManagerLoggerReferenceCountAddResultRefrenceCountZero,
+    CPMemoryManagerLoggerReferenceCountAddResultRefrenceCountOne,
+    CPMemoryManagerLoggerReferenceCountAddResultRefrenceCountTooLarge,
+};
+int CPMemoryManagerLoggerReferenceCountAdd(CPMemoryManagerLoggerContainer_s * _Nonnull container, uint64_t * _Nonnull oldRefrenceCountRef, uint64_t * _Nonnull newRefrenceCountRef) {
+    assert(container);
+    assert(oldRefrenceCountRef);
+    assert(newRefrenceCountRef);
+
+#if CPTARGET_RT_64_BIT
+    uint64_t refrenceCount = 0;
+    uint64_t newRefrenceCount = 0;
+#else
+    uint32_t refrenceCount = 0;
+    uint32_t newRefrenceCount = 0;
+#endif
+    do {
+        refrenceCount = atomic_load(&(container->refrenceCount));
+#if CPTARGET_RT_64_BIT
+        if (refrenceCount == UINT64_MAX) {
+            return CPMemoryManagerLoggerReferenceCountAddResultRefrenceCountTooLarge;
+        } else if (refrenceCount == 0) {
+            return CPMemoryManagerLoggerReferenceCountAddResultRefrenceCountZero;
+        } else if (refrenceCount == 1) {
+            return CPMemoryManagerLoggerReferenceCountAddResultRefrenceCountOne;
+        }
+#else
+        if (refrenceCount == UINT32_MAX) {
+            return CPMemoryManagerLoggerReferenceCountAddResultRefrenceCountTooLarge;
+        } else if (refrenceCount == 0) {
+            return CPMemoryManagerLoggerReferenceCountAddResultRefrenceCountZero;
+        } else if (refrenceCount == 1) {
+            return CPMemoryManagerLoggerReferenceCountAddResultRefrenceCountOne;
+        }
+#endif
+        newRefrenceCount = refrenceCount + 1;
+    } while(!CPCASSetFast64(&(container->refrenceCount), refrenceCount, newRefrenceCount));
+    
+    *oldRefrenceCountRef = (uint64_t)refrenceCount;
+    *newRefrenceCountRef = (uint64_t)newRefrenceCount;
+    return CPMemoryManagerLoggerReferenceCountAddResultSuccess;
+}
+
+// 最小值1
+
+enum CPMemoryManagerLoggerReferenceCountSubtractResult {
+    CPMemoryManagerLoggerReferenceCountSubtractResultSuccess,
+    CPMemoryManagerLoggerReferenceCountSubtractResultRefrenceCountZero,
+    CPMemoryManagerLoggerReferenceCountSubtractResultRefrenceCountOne,
+};
+
+int CPMemoryManagerLoggerReferenceCountSubtract(CPMemoryManagerLoggerContainer_s * _Nonnull container, uint64_t * _Nonnull oldRefrenceCountRef, uint64_t * _Nonnull newRefrenceCountRef) {
+    assert(container);
+    assert(oldRefrenceCountRef);
+    assert(newRefrenceCountRef);
+    
+#if CPTARGET_RT_64_BIT
+    uint64_t refrenceCount = 0;
+    uint64_t newRefrenceCount = 0;
+#else
+    uint32_t refrenceCount = 0;
+    uint32_t newRefrenceCount = 0;
+#endif
+    do {
+        refrenceCount = atomic_load(&(container->refrenceCount));
+        if (refrenceCount == 0) {
+            return CPMemoryManagerLoggerReferenceCountSubtractResultRefrenceCountZero;
+        } else if (refrenceCount == 1) {
+            return CPMemoryManagerLoggerReferenceCountSubtractResultRefrenceCountOne;
+        }
+        newRefrenceCount = refrenceCount - 1;
+    } while(!CPCASSetFast64(&(container->refrenceCount), refrenceCount, newRefrenceCount));
+    *oldRefrenceCountRef = (uint64_t)refrenceCount;
+    *newRefrenceCountRef = (uint64_t)newRefrenceCount;
+
+    return CPMemoryManagerLoggerReferenceCountSubtractResultSuccess;
+}
+
+CPMemoryManagerLoggerContainer_s * _Nullable CPMemoryManagerLoggerRetain(CPMemoryManager_t * _Nonnull manager, uint32_t index) {
+    assert(manager);
+    if (index >= 64) {
+        return NULL;
+    }
+    CPMemoryManagerLoggerContainer_s * container = &(manager->loggerItems[index]);
+    uint64_t oldRefrenceCount;
+    uint64_t newRefrenceCount;
+    int addResult = CPMemoryManagerLoggerReferenceCountAdd(container, &oldRefrenceCount, &newRefrenceCount);
+    if (addResult == CPMemoryManagerLoggerReferenceCountAddResultSuccess) {
+        return container;
+    }
+    return NULL;
+}
+int CPMemoryManagerLoggerRelease(CPMemoryManager_t * _Nonnull manager, uint32_t index) {
+    assert(manager);
+    if (index >= 64) {
+        abort();
+    }
+    CPMemoryManagerLoggerContainer_s * container = &(manager->loggerItems[index]);
+    uint64_t oldRefrenceCount;
+    uint64_t newRefrenceCount;
+    int subResult = CPMemoryManagerLoggerReferenceCountSubtract(container, &oldRefrenceCount, &newRefrenceCount);
+    if (subResult == CPMemoryManagerLoggerReferenceCountSubtractResultSuccess) {
+        if (newRefrenceCount == 1) {
+            uintptr_t loggerAddress = atomic_load(&(container->logger));
+            CPMemoryLoggerRef logger = (CPMemoryLoggerRef)loggerAddress;
+            atomic_store(&(container->logger), 0);
+            CPMemoryBarrier();
+            atomic_store(&(container->refrenceCount), 0);
+            CPRelease(logger);
+            return 0;
+        } else {
+            if (newRefrenceCount > INT_MAX) {
+                return INT_MAX;
+            } else {
+                return (int)newRefrenceCount;
+            }
+        }
+    } else {
+        return -1;
+    }
+}
+
 int CPMemoryManagerRemoveLogger(CPMemoryManager_t * _Nonnull manager, int key) {
     assert(manager);
     
-    if (key <= 0) {
+    if (key <= 0 || key > 64) {
         return -1;
     }
+    uint32_t index = (uint32_t)(key - 1);
+    uint64_t flags = CPGetFast64(&(manager->loggerFlags));
+    uint64_t activeMask = 0x1;
+    uint64_t mask = activeMask << index;
+    uint64_t newFlags = flags & (~mask);
 
-//    CPObject v = CPRetain(logger);
-//    if (v) {
-//        int bitIndex = -1;
-//        uint64_t flags = 0;
-//        uint64_t newFlags = flags;
-//
-//        do {
-//            flags = CPGetFast64(&(CPMemoryManagerDefault()->loggerFlags));
-//            newFlags = flags;
-//            bitIndex = -1;
-//            uint64_t mask = 1;
-//            for (int i=0; i<64; i++) {
-//                uint64_t flag = mask << i;
-//                if ((flags & flag) != flag) {
-//                    bitIndex = i;
-//                    newFlags = flags | flag;
-//                }
-//            }
-//            if (bitIndex < 0) {
-//                CPRelease(logger);
-//                return 1;
-//            }
-//        } while(!CPCASSetFast64(&(CPMemoryManagerDefault()->loggerFlags), flags, newFlags));
-//        uintptr_t obj = (uintptr_t)logger;
-//        atomic_store(&(CPMemoryManagerDefault()->loggers[bitIndex]), obj);
-//        return 0;
-//    } else {
-//        return -1;
-//    }
+    do {
+        flags = CPGetFast64(&(manager->loggerFlags));
+        
+        if ((flags & mask) != mask) {
+            return -1;
+        }
+        
+        newFlags = flags & (~mask);;
+    } while(!CPCASSetFast64(&(manager->loggerFlags), flags, newFlags));
+    
+    return CPMemoryManagerLoggerRelease(manager, index);
 }
 
 
 
-CPAllocedMemory_s CPBaseAlloc(struct __CPAlloctor const * _Nonnull alloctor, size_t size) {
+CPAllocedMemory_s const CPBaseAlloc(struct __CPAlloctor const * _Nonnull alloctor, size_t size) {
     if (size == 0) {
         abort();
     }
@@ -143,21 +293,36 @@ CPAllocedMemory_s CPBaseAlloc(struct __CPAlloctor const * _Nonnull alloctor, siz
             abort();
         }
     }
-    CPAllocedMemory_s m = {ptr, size};
+    CPAllocedMemory_s m = {
+        .flag = {
+            .action = 1,
+            .code = 0,
+        },
+        .ptr = ptr,
+        .size = size
+    };
     return m;
 }
-void CPBaseDealloc(struct __CPAlloctor const * _Nonnull alloctor, void * _Nonnull ptr, size_t size) {
+CPMemoryFlag_s const CPBaseDealloc(struct __CPAlloctor const * _Nonnull alloctor, void * _Nonnull ptr, size_t size) {
     assert(ptr);
     if (size == 0) {
         abort();
     }
     CBaseFree(ptr, size);
+    
+    CPMemoryFlag_s flag = {
+        .action = 1,
+        .code = 0,
+    };
+    return flag;
 }
 
-void * _Nonnull CPAllocInit(struct __CPAlloctor const * _Nonnull alloctor, CPType _Nonnull type, size_t contentPaddingSize, _Bool autoDealloc, _Bool isStatic) {
+CPAllocResult_s const CPAlloc(struct __CPAlloctor const * _Nonnull alloctor, CPType _Nonnull type, size_t contentPaddingSize) {
     
     assert(alloctor);
     assert(type);
+    
+    CPAllocResult_s result = {};
     
     size_t customInfoSize = type->base.customInfoSize * CPContentAligentBlock;
     size_t contentSize = type->base.contentBaseSize;
@@ -166,14 +331,65 @@ void * _Nonnull CPAllocInit(struct __CPAlloctor const * _Nonnull alloctor, CPTyp
     }
     size_t realContentSize = CPAlignContentSize(contentSize);
     
-    void * ptr = NULL;
-    
     if (realContentSize > CPMaxContentSize) {
-        printf("alloc a too large size memory!!!\n");
+        printf("alloc memory error, size too large !!!\n");
         abort();
     }
     CPObject t = CPRetain(type);
     assert(t);
+    CPMemoryFlag_s flag = {};
+    
+    if (type->base.contentHasPadding) {
+        size_t contentBlockCountInHeader = realContentSize / CPContentAligentBlock;
+        
+        if (contentBlockCountInHeader >= CPMaxContentSizeInActiveInfo) {
+            result.contentSizeInActiveInfo = CPMaxContentSizeInActiveInfo;
+            size_t realSize = result.customInfoSize + CPContentSizeByteCount + sizeof(CPInfoStorage_s) + realContentSize;
+            CPAllocedMemory_s m = alloctor->memoryAlloc(alloctor, realSize);
+            flag = m.flag;
+            result.ptr = m.ptr;
+            result.size = m.size;
+            uint8_t * contentSizePtr = (uint8_t *)result.ptr + customInfoSize;
+            __CPStoreContentSize(contentSizePtr, realContentSize);
+            result.infoStorage = (CPInfoStorage_s *)((uint8_t *)result.ptr + customInfoSize + CPContentSizeByteCount);
+            result.obj = ((uint8_t *)result.ptr + customInfoSize + CPContentSizeByteCount + CPInfoStoreSize);
+        } else {
+            result.contentSizeInActiveInfo = contentBlockCountInHeader;
+            size_t realSize = customInfoSize + CPInfoStoreSize + realContentSize;
+            CPAllocedMemory_s m = alloctor->memoryAlloc(alloctor, realSize);
+            flag = m.flag;
+            result.ptr = m.ptr;
+            result.size = m.size;
+            result.infoStorage = (CPInfoStorage_s *)((uint8_t *)result.ptr + customInfoSize);
+            result.obj = ((uint8_t *)result.ptr + customInfoSize + CPInfoStoreSize);
+        }
+    } else {
+        result.contentSizeInActiveInfo = 0;
+        size_t realSize = customInfoSize + CPInfoStoreSize + realContentSize;
+        CPAllocedMemory_s m = alloctor->memoryAlloc(alloctor, realSize);
+        flag = m.flag;
+        result.ptr = m.ptr;
+        result.size = m.size;
+        result.infoStorage = (CPInfoStorage_s *)((uint8_t *)result.ptr + customInfoSize);
+        result.obj = ((uint8_t *)result.ptr + customInfoSize + CPInfoStoreSize);
+    }
+    if (flag.action == 1) {
+        //log malloc
+        
+        
+    }
+    
+    if (customInfoSize > 0) {
+        result.customInfoSize = customInfoSize;
+        result.customInfo = result.ptr;
+    }
+    CPInfoStorageStoreType(result.infoStorage, type);
+    return result;
+}
+void * _Nonnull CPInit(struct __CPAlloctor const * _Nonnull alloctor, CPAllocResult_s * _Nonnull allocedInfo, _Bool autoDealloc, _Bool isStatic) {
+    
+    assert(alloctor);
+    assert(allocedInfo);
     
     CPActiveInfo_s activeInfo = {};
     if (isStatic) {
@@ -183,41 +399,80 @@ void * _Nonnull CPAllocInit(struct __CPAlloctor const * _Nonnull alloctor, CPTyp
         activeInfo.refrenceCount = 1;
         activeInfo.autoDealloc = autoDealloc;
     }
+    activeInfo.contentSize = allocedInfo->contentSizeInActiveInfo;
+    CPInfoStorageStoreActiveInfo(allocedInfo->infoStorage, &activeInfo);
+    return allocedInfo->obj;
+}
+
+
+void * _Nonnull CPAllocInit(struct __CPAlloctor const * _Nonnull alloctor, CPType _Nonnull type, size_t contentPaddingSize, _Bool autoDealloc, _Bool isStatic) {
     
-    if (type->base.contentHasPadding) {
-        size_t contentBlockCountInHeader = realContentSize / CPContentAligentBlock;
-        
-        if (contentBlockCountInHeader >= CPMaxContentSizeInActiveInfo) {
-            activeInfo.contentSize = CPMaxContentSizeInActiveInfo;
-            
-            size_t realSize = customInfoSize + CPContentSizeByteCount + sizeof(CPInfoStorage_s) + realContentSize;
-            CPAllocedMemory_s m = alloctor->memoryAlloc(alloctor, realSize);
-            ptr = m.ptr;
-            
-            __CPStoreContentSize((uint8_t *)ptr + customInfoSize, realContentSize);
-            CPInfoStorage_s * tmp = (CPInfoStorage_s *)((uint8_t *)ptr + customInfoSize + CPContentSizeByteCount);
-            CPInfoStorageStore(tmp, type, &activeInfo);
-            return ((uint8_t *)ptr + customInfoSize + CPContentSizeByteCount + CPInfoStoreSize);
-        } else {
-            activeInfo.contentSize = contentBlockCountInHeader;
-            
-            size_t realSize = customInfoSize + CPInfoStoreSize + realContentSize;
-            CPAllocedMemory_s m = alloctor->memoryAlloc(alloctor, realSize);
-            ptr = m.ptr;
-            
-            CPInfoStorage_s * tmp = (CPInfoStorage_s *)((uint8_t *)ptr + customInfoSize);
-            CPInfoStorageStore(tmp, type, &activeInfo);
-            return ((uint8_t *)ptr + customInfoSize + CPInfoStoreSize);
-        }
-    } else {
-        activeInfo.contentSize = 0;
-        size_t realSize = customInfoSize + CPInfoStoreSize + realContentSize;
-        CPAllocedMemory_s m = alloctor->memoryAlloc(alloctor, realSize);
-        ptr = m.ptr;
-        CPInfoStorage_s * tmp = (CPInfoStorage_s *)((uint8_t *)ptr + customInfoSize);
-        CPInfoStorageStore(tmp, type, &activeInfo);
-        return ((uint8_t *)ptr + customInfoSize + CPInfoStoreSize);
-    }
+    assert(alloctor);
+    assert(type);
+    
+    CPAllocResult_s result = alloctor->alloc(alloctor, type, contentPaddingSize);;
+    return alloctor->init(alloctor, &result, autoDealloc, isStatic);
+    
+    
+//    size_t customInfoSize = type->base.customInfoSize * CPContentAligentBlock;
+//    size_t contentSize = type->base.contentBaseSize;
+//    if (type->base.contentHasPadding) {
+//        contentSize += contentPaddingSize;
+//    }
+//    size_t realContentSize = CPAlignContentSize(contentSize);
+//
+//    void * ptr = NULL;
+//
+//    if (realContentSize > CPMaxContentSize) {
+//        printf("alloc a too large size memory!!!\n");
+//        abort();
+//    }
+//    CPObject t = CPRetain(type);
+//    assert(t);
+//
+//    CPActiveInfo_s activeInfo = {};
+//    if (isStatic) {
+//        activeInfo.refrenceCount = CPRefrenceStaticFlag;
+//        activeInfo.autoDealloc = 0;
+//    } else {
+//        activeInfo.refrenceCount = 1;
+//        activeInfo.autoDealloc = autoDealloc;
+//    }
+//
+//    if (type->base.contentHasPadding) {
+//        size_t contentBlockCountInHeader = realContentSize / CPContentAligentBlock;
+//
+//        if (contentBlockCountInHeader >= CPMaxContentSizeInActiveInfo) {
+//            activeInfo.contentSize = CPMaxContentSizeInActiveInfo;
+//
+//            size_t realSize = customInfoSize + CPContentSizeByteCount + sizeof(CPInfoStorage_s) + realContentSize;
+//            CPAllocedMemory_s m = alloctor->memoryAlloc(alloctor, realSize);
+//            ptr = m.ptr;
+//
+//            __CPStoreContentSize((uint8_t *)ptr + customInfoSize, realContentSize);
+//            CPInfoStorage_s * tmp = (CPInfoStorage_s *)((uint8_t *)ptr + customInfoSize + CPContentSizeByteCount);
+//            CPInfoStorageStore(tmp, type, &activeInfo);
+//            return ((uint8_t *)ptr + customInfoSize + CPContentSizeByteCount + CPInfoStoreSize);
+//        } else {
+//            activeInfo.contentSize = contentBlockCountInHeader;
+//
+//            size_t realSize = customInfoSize + CPInfoStoreSize + realContentSize;
+//            CPAllocedMemory_s m = alloctor->memoryAlloc(alloctor, realSize);
+//            ptr = m.ptr;
+//
+//            CPInfoStorage_s * tmp = (CPInfoStorage_s *)((uint8_t *)ptr + customInfoSize);
+//            CPInfoStorageStore(tmp, type, &activeInfo);
+//            return ((uint8_t *)ptr + customInfoSize + CPInfoStoreSize);
+//        }
+//    } else {
+//        activeInfo.contentSize = 0;
+//        size_t realSize = customInfoSize + CPInfoStoreSize + realContentSize;
+//        CPAllocedMemory_s m = alloctor->memoryAlloc(alloctor, realSize);
+//        ptr = m.ptr;
+//        CPInfoStorage_s * tmp = (CPInfoStorage_s *)((uint8_t *)ptr + customInfoSize);
+//        CPInfoStorageStore(tmp, type, &activeInfo);
+//        return ((uint8_t *)ptr + customInfoSize + CPInfoStoreSize);
+//    }
 }
 void CPDealloc(struct __CPAlloctor const * _Nonnull alloctor, CPObject _Nonnull obj) {
     assert(obj);
@@ -226,9 +481,15 @@ void CPDealloc(struct __CPAlloctor const * _Nonnull alloctor, CPObject _Nonnull 
     
     CPInfoStorage_s * info = CPGetInfo(obj);
     CPType_s * type = CPGetType(info);
-    CPRelease(type);
+    CPMemoryFlag_s flag = alloctor->memoryDealloc(alloctor, m.ptr, m.size);
     
-    CBaseFree(m.ptr, m.size);
+    if (flag.action == 1) {
+        //log free
+        
+        
+        
+    }
+    CPRelease(type);
 }
 
 size_t CPGetStoreSizeWithType(CPType _Nonnull type, size_t contentPaddingSize) {
@@ -261,7 +522,31 @@ size_t CPGetStoreSize(void * _Nonnull obj) {
     return m.size;
 }
 
-static CPAlloctor_s const CPAlloctorDefault = {CPBaseAlloc, CPBaseDealloc, CPAllocInit, CPDealloc, NULL};
+/*
+ typedef struct __CPAlloctor {
+ //memory
+ CPAllocedMemory_s (* _Nonnull memoryAlloc)(struct __CPAlloctor const * _Nonnull alloctor, size_t size);
+ void (* _Nonnull memoryDealloc)(struct __CPAlloctor const * _Nonnull alloctor, void * _Nonnull ptr, size_t size);
+ 
+ 
+ CPAllocResult_s const (* _Nonnull alloc)(struct __CPAlloctor const * _Nonnull alloctor, CPType _Nonnull type, size_t contentPaddingSize);
+ void * _Nonnull (* _Nonnull init)(struct __CPAlloctor const * _Nonnull alloctor, CPAllocResult_s * _Nonnull allocedInfo, _Bool autoDealloc, _Bool isStatic);
+ void * _Nonnull (* _Nonnull allocInit)(struct __CPAlloctor const * _Nonnull alloctor, CPType _Nonnull type, size_t contentMutableSize, _Bool autoDealloc, _Bool isStatic);
+ void (* _Nonnull dealloc)(struct __CPAlloctor const * _Nonnull alloctor, CPObject _Nonnull obj);
+ 
+ 
+ void * _Nullable context;
+ } CPAlloctor_s;
+ */
+static CPAlloctor_s const CPAlloctorDefault = {
+    .memoryAlloc = CPBaseAlloc,
+    .memoryDealloc = CPBaseDealloc,
+    .alloc = CPAlloc,
+    .init = CPInit,
+    .allocInit = CPAllocInit,
+    .dealloc = CPDealloc,
+    .context = NULL,
+};
 CPAlloctor_s const * _Nonnull CPAlloctorGetDefault(void) {
     return &CPAlloctorDefault;
 }

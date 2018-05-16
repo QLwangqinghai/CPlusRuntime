@@ -13,7 +13,32 @@
 #include <stdlib.h>
 #include <pthread/pthread.h>
 
-typedef void (* CPMemoryManagerLogFunc)(void * _Nonnull ptr, size_t size);
+
+typedef struct {
+    uintptr_t ptrAddress;
+    size_t size;
+    CPType _Nonnull type;
+    uint32_t source: 8;
+    uint32_t code: 24;
+} CPMemoryLogItem_s;
+
+
+typedef struct __CPMemoryManagerLoggerContainer {
+#if CPTARGET_RT_64_BIT
+    _Atomic(uint_fast64_t) refrenceCount;
+#else
+    _Atomic(uint_fast32_t) refrenceCount;
+#endif
+    _Atomic(uintptr_t) logger;
+} CPMemoryManagerLoggerContainer_s;
+
+typedef struct __CPMemoryLoggerManager {
+    _Atomic(uint_fast64_t) loggerFlags;
+    CPMemoryManagerLoggerContainer_s loggerItems[64];
+} CPMemoryLoggerManager_s;
+
+
+typedef void (* CPMemoryManagerLogFunc)(CPMemoryLogItem_s item);
 
 typedef struct {
     void * _Nullable context;
@@ -21,9 +46,9 @@ typedef struct {
 
     CPMemoryManagerLogFunc _Nonnull logFunc;
     uint32_t const contentSize;
-} CPMemoryManagerLogger_o;
+} CPMemoryLogger_o;
 
-typedef CPMemoryManagerLogger_o const * CPMemoryManagerLoggerRef;
+typedef CPMemoryLogger_o const * CPMemoryLoggerRef;
 
 void CPMemoryManagerLoggerDeinit(void const * _Nonnull object);
 
@@ -35,8 +60,8 @@ static CPTypeLayout_s const CPTypeStorage_CPMemoryManagerLogger = {
             .domain = CCTypeDomain,
             .contentHasPadding = 0,
             .customInfoSize = 0,
-            .contentBaseSize = sizeof(CPMemoryManagerLogger_o),
-            .name = "CPMemoryManagerLogger",
+            .contentBaseSize = sizeof(CPMemoryLogger_o),
+            .name = "CPlus.MemoryLogger",
             .superType = NULL,
             .alloctor = NULL,
             .deinit = CPMemoryManagerLoggerDeinit,
@@ -47,14 +72,6 @@ static CPTypeLayout_s const CPTypeStorage_CPMemoryManagerLogger = {
 };
 
 
-typedef struct __CPMemoryManagerLoggerContainer {
-#if CPTARGET_RT_64_BIT
-    _Atomic(uint_fast64_t) refrenceCount;
-#else
-    _Atomic(uint_fast32_t) refrenceCount;
-#endif
-    _Atomic(uintptr_t) logger;
-} CPMemoryManagerLoggerContainer_s;
 
 typedef struct __CPMemoryManager {
     _Atomic(uint_fast64_t) ptrCount;
@@ -70,7 +87,7 @@ static CPMemoryManager_t __CPMemoryManagerDefault = {};
 CPMemoryManager_t * _Nonnull CPMemoryManagerDefault(void);
 
 //return < 0 for error, 0 for failure, [1, 64] for key
-int CPMemoryManagerAddLogger(CPMemoryManager_t * _Nonnull manager, CPMemoryManagerLoggerRef _Nonnull logger);
+int CPMemoryManagerAddLogger(CPAlloctor_s * _Nonnull alloctor, CPMemoryLoggerRef _Nonnull logger);
 
 
 static inline uint64_t CPGetFast64(_Atomic(uint_fast64_t) * _Nonnull ptr) {
@@ -197,6 +214,21 @@ static inline CPAllocedMemory_s __CPGetMemoryStoreInfo(CPObject _Nonnull obj) {
         m.size = contentSize + offset;
         return m;
     }
+}
+
+
+static inline void CPInfoStorageStoreType(CPInfoStorage_s * _Nonnull ptr, CPType _Nonnull type) {
+    uintptr_t typeValue = (uintptr_t)type;
+    atomic_store(&(ptr->type), typeValue);
+}
+static inline void CPInfoStorageStoreActiveInfo(CPInfoStorage_s * _Nonnull ptr, CPActiveInfo_s * _Nonnull activeInfo) {
+#if CPMemoryHeaderAligent64
+    uint64_t infoValue = *(uint64_t *)(activeInfo);
+    atomic_store(&(ptr->activeInfo), infoValue);
+#else
+    uint32_t infoValue = *(uint32_t *)(activeInfo);
+    atomic_store(&(ptr->activeInfo), infoValue);
+#endif
 }
 
 #if CPMemoryHeaderAligent64
