@@ -11,6 +11,9 @@
 CPMemoryLoggerManager_s * _Nonnull CPMemoryLoggerManagerAllocInit(void);
 int CPMemoryLoggerManagerAddLogger(CPMemoryLoggerManager_s * _Nonnull manager, CPMemoryLoggerRef _Nonnull logger, uint32_t * _Nonnull keyRef);
 int CPMemoryLoggerManagerRemoveLogger(CPMemoryLoggerManager_s * _Nonnull manager, uint32_t key);
+CPMemoryManagerLoggerContainer_s * _Nullable CPMemoryLoggerRetain(CPMemoryLoggerManager_s * _Nonnull manager, uint32_t index);
+int CPMemoryLoggerRelease(CPMemoryLoggerManager_s * _Nonnull manager, uint32_t index);
+
 
 static CPMemoryLoggerManager_s * CPAlloctorDefaultLoggerManager = NULL;
 void __CPAlloctorDefaultLoggerManagerInit() {
@@ -71,9 +74,21 @@ CPMemoryLoggerManager_s * _Nonnull CPMemoryLoggerManagerAllocInit() {
 void CPMemoryLoggerManagerLog(struct __CPAlloctor const * _Nonnull alloctor, CPMemoryLoggerManager_s * _Nonnull manager, CPMemoryLogItem_s * _Nonnull item) {
     assert(manager);
     
-    
-    
-    
+    uint64_t flags = CPGetFast64(&(manager->loggerFlags));
+    uint64_t activeMask = 0x1;
+    for (int i=0; i<64; i++) {
+        uint64_t offset = i;
+        uint64_t flag = (activeMask << offset);
+        if ((flags & flag) == flag) {
+            CPMemoryManagerLoggerContainer_s * container = CPMemoryLoggerRetain(manager, i);
+            if (container) {
+                uintptr_t loggerPtr = atomic_load(&(container->logger));
+                CPMemoryLoggerRef logger = (CPMemoryLoggerRef)loggerPtr;
+                logger->logFunc(logger, item);
+                CPMemoryLoggerRelease(manager, i);
+            }
+        }
+    }    
 }
 
 void CPAlloctorLog(struct __CPAlloctor const * _Nonnull alloctor, CPMemoryLogItem_s * _Nonnull item) {
