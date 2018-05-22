@@ -8,11 +8,45 @@
 
 #include "CPlusRuntimePrivate.h"
 
+CPMemoryLoggerManager_s * _Nonnull CPMemoryLoggerManagerAllocInit(void);
+int CPMemoryLoggerManagerAddLogger(CPMemoryLoggerManager_s * _Nonnull manager, CPMemoryLoggerRef _Nonnull logger, uint32_t * _Nonnull keyRef);
+int CPMemoryLoggerManagerRemoveLogger(CPMemoryLoggerManager_s * _Nonnull manager, uint32_t key);
+
+static CPMemoryLoggerManager_s * CPAlloctorDefaultLoggerManager = NULL;
+void __CPAlloctorDefaultLoggerManagerInit() {
+    CPAlloctorDefaultLoggerManager = CPMemoryLoggerManagerAllocInit();
+}
+
+CPMemoryLoggerManager_s * _Nonnull CPAlloctorDefaultGetLoggerManager(void) {
+    
+    static pthread_once_t token = PTHREAD_ONCE_INIT;
+    pthread_once(&token,&__CPAlloctorDefaultLoggerManagerInit);
+    
+    return CPAlloctorDefaultLoggerManager;
+}
 
 CPMemoryManager_t * _Nonnull CPMemoryManagerDefault(void) {
     return &__CPMemoryManagerDefault;
 }
-void CPMemoryManagerLoggerDeinit(void const * _Nonnull object) {
+
+
+CPMemoryLogger_o * _Nonnull CPMemoryLoggerAllocInit(void * _Nullable context,
+                             void (* _Nullable contextRelease)(void * _Nonnull context),
+                                                    CPMemoryManagerLogFunc _Nullable logFunc) {
+    CPType Self = CPType_CPMemoryLogger;
+    CPAlloctor_s const * alloctor = (CPAlloctor_s const *)(Self->base.alloctor);
+    if (NULL == alloctor) {
+        alloctor = CPAlloctorGetDefault();
+    }
+    
+    void * ptr = alloctor->allocInit(alloctor, Self, 0, 1, 0);
+    CPMemoryLogger_o * logger = (CPMemoryLogger_o *)ptr;
+    logger->context = context;
+    logger->contextRelease = contextRelease;
+    logger->logFunc = logFunc;
+    return logger;
+}
+void CPMemoryLoggerDeinit(void const * _Nonnull object) {
     CPMemoryLogger_o * logger  = (CPMemoryLogger_o *)object;
     if (logger->context) {
         logger->contextRelease(logger->context);
@@ -25,30 +59,64 @@ CPMemoryUsedInfo_s CPMemoryUsedInfo(void) {
     return i;
 }
 
-CPMemoryManager_t * _Nonnull CPMemoryManagerAllocInit() {
-    return NULL;
+CPMemoryLoggerManager_s * _Nonnull CPMemoryLoggerManagerAllocInit() {
+    CPAlloctor_s const * alloctor = CPAlloctorGetDefault();
+    CPAllocedMemory_s m = (alloctor->memoryAlloc(alloctor, sizeof(CPMemoryLoggerManager_s)));
+    CPMemoryLoggerManager_s * manager = (CPMemoryLoggerManager_s *)(m.ptr);
+    memset(manager, 0, m.size);
+    atomic_store(&(manager->loggerFlags), 0);
+    return manager;
 }
 
-
-int CPMemoryManagerAddLogger(CPAlloctor_s * _Nonnull alloctor, CPMemoryLoggerRef _Nonnull logger) {
-// 0 NUll; 1 prepare; 2 active
-    assert(alloctor);
+void CPMemoryLoggerManagerLog(struct __CPAlloctor const * _Nonnull alloctor, CPMemoryLoggerManager_s * _Nonnull manager, CPMemoryLogItem_s * _Nonnull item) {
+    assert(manager);
     
+    
+    
+    
+}
+
+void CPAlloctorLog(struct __CPAlloctor const * _Nonnull alloctor, CPMemoryLogItem_s * _Nonnull item) {
+    assert(alloctor);
+    if (CPAlloctorGetDefault() == alloctor) {
+        CPMemoryLoggerManagerLog(alloctor, CPAlloctorDefaultGetLoggerManager(), item);
+    } else {
+        struct __CPAlloctor * atr = (struct __CPAlloctor *)alloctor;
+        uintptr_t loggerManagerPtr = atomic_load(&(atr->loggerManager));
+
+        CPMemoryLoggerManager_s * manager = (CPMemoryLoggerManager_s *)loggerManagerPtr;
+        if (NULL != manager) {
+            CPMemoryLoggerManagerLog(alloctor, manager, item);
+        }
+    }
+}
+
+int CPAlloctorDefaultAddLogger(CPMemoryLoggerRef _Nonnull logger, uint32_t * _Nonnull keyRef) {
+    CPMemoryLoggerManager_s * manager = CPAlloctorDefaultGetLoggerManager();
+    return CPMemoryLoggerManagerAddLogger(manager, logger, keyRef);
+}
+
+//0 for no error
+int CPAlloctorAddLogger(CPAlloctor_s * _Nonnull alloctor, CPMemoryLoggerRef _Nonnull logger, uint32_t * _Nonnull keyRef) {
+    assert(alloctor);
+    assert(logger);
+    assert(keyRef);
+
     uintptr_t oldLoggerManager = 0;
     uintptr_t newLoggerManager = 0;
     
-    CPMemoryManager_t * manager = NULL;
-    CPMemoryManager_t * tmpManager = NULL;
+    CPMemoryLoggerManager_s * manager = NULL;
+    CPMemoryLoggerManager_s * tmpManager = NULL;
 
     do {
         oldLoggerManager = atomic_load(&(alloctor->loggerManager));
         if (0 == oldLoggerManager) {
             if (NULL == tmpManager) {
-                tmpManager = CPMemoryManagerAllocInit();
+                tmpManager = CPMemoryLoggerManagerAllocInit();
             }
             newLoggerManager = (uintptr_t)tmpManager;
         } else {
-            manager = (CPMemoryManager_t *)oldLoggerManager;
+            manager = (CPMemoryLoggerManager_s *)oldLoggerManager;
             if (tmpManager) {
                 CPRelease(tmpManager);
                 tmpManager = NULL;
@@ -61,71 +129,7 @@ int CPMemoryManagerAddLogger(CPAlloctor_s * _Nonnull alloctor, CPMemoryLoggerRef
     
 afterGetManager:
     
-    assert(manager);
-    assert(logger);
-    CPObject v = CPRetain(logger);
-    
-    int bitIndex = -1;
-    if (v) {
-        uint64_t flags = CPGetFast64(&(manager->loggerFlags));
-        uint64_t activeMask = 0x1;
-        for (int i=0; i<64; i++) {
-            uint64_t offset = i;
-            uint64_t flag = (activeMask << offset);
-            if ((flags & flag) == 0) {
-                CPMemoryManagerLoggerContainer_s * container = &(manager->loggerItems[i]);
-                int setInitFlagResult = 1;
-#if CPTARGET_RT_64_BIT
-                uint64_t refrenceCount = 0;
-                uint64_t newRefrenceCount = 1;
-#else
-                uint32_t refrenceCount = 0;
-                uint32_t newRefrenceCount = 1;
-#endif
-                do {
-                    refrenceCount = atomic_load(&(container->refrenceCount));
-                    if (refrenceCount != 0) {
-                        setInitFlagResult = 0;
-                        break;
-                    }
-                } while(!CPCASSetFast64(&(container->refrenceCount), refrenceCount, newRefrenceCount));
-                
-                
-                if (setInitFlagResult >= 1) {
-                    bitIndex = i;
-                    break;
-                }
-            }
-        }
-        if (bitIndex < 0) {
-            CPRelease(logger);
-            return 0;
-        }
-        uint64_t mask = activeMask << bitIndex;
-        uint64_t newFlags = flags;
-
-        do {
-            flags = CPGetFast64(&(manager->loggerFlags));
-            
-#if DEBUG
-            if ((flags & (~mask)) != flags) {
-                abort();
-            }
-#endif
-            
-            newFlags = flags | mask;
-        } while(!CPCASSetFast64(&(manager->loggerFlags), flags, newFlags));
-
-        uintptr_t obj = (uintptr_t)logger;
-        
-        CPMemoryManagerLoggerContainer_s * container = &(manager->loggerItems[bitIndex]);
-        atomic_store(&(container->logger), obj);
-        CPMemoryBarrier();
-        atomic_store(&(container->refrenceCount), 2);
-        return bitIndex + 1;
-    } else {
-        return -1;
-    }
+    return CPMemoryLoggerManagerAddLogger(manager, logger, keyRef);
 }
 
 enum CPMemoryManagerLoggerReferenceCountAddResult {
@@ -208,7 +212,7 @@ int CPMemoryManagerLoggerReferenceCountSubtract(CPMemoryManagerLoggerContainer_s
     return CPMemoryManagerLoggerReferenceCountSubtractResultSuccess;
 }
 
-CPMemoryManagerLoggerContainer_s * _Nullable CPMemoryManagerLoggerRetain(CPMemoryManager_t * _Nonnull manager, uint32_t index) {
+CPMemoryManagerLoggerContainer_s * _Nullable CPMemoryLoggerRetain(CPMemoryLoggerManager_s * _Nonnull manager, uint32_t index) {
     assert(manager);
     if (index >= 64) {
         return NULL;
@@ -222,7 +226,7 @@ CPMemoryManagerLoggerContainer_s * _Nullable CPMemoryManagerLoggerRetain(CPMemor
     }
     return NULL;
 }
-int CPMemoryManagerLoggerRelease(CPMemoryManager_t * _Nonnull manager, uint32_t index) {
+int CPMemoryLoggerRelease(CPMemoryLoggerManager_s * _Nonnull manager, uint32_t index) {
     assert(manager);
     if (index >= 64) {
         abort();
@@ -252,10 +256,77 @@ int CPMemoryManagerLoggerRelease(CPMemoryManager_t * _Nonnull manager, uint32_t 
     }
 }
 
-int CPMemoryManagerRemoveLogger(CPMemoryManager_t * _Nonnull manager, int key) {
+int CPMemoryLoggerManagerAddLogger(CPMemoryLoggerManager_s * _Nonnull manager, CPMemoryLoggerRef _Nonnull logger, uint32_t * _Nonnull keyRef) {
+
+    assert(manager);
+    CPObject v = CPRetain(logger);
+    
+    if (NULL == v) {
+        return -1;
+    }
+    
+    int bitIndex = -1;
+    uint64_t flags = CPGetFast64(&(manager->loggerFlags));
+    uint64_t activeMask = 0x1;
+    for (int i=0; i<64; i++) {
+        uint64_t offset = i;
+        uint64_t flag = (activeMask << offset);
+        if ((flags & flag) == 0) {
+            CPMemoryManagerLoggerContainer_s * container = &(manager->loggerItems[i]);
+            int setInitFlagResult = 1;
+#if CPTARGET_RT_64_BIT
+            uint64_t refrenceCount = 0;
+            uint64_t newRefrenceCount = 1;
+#else
+            uint32_t refrenceCount = 0;
+            uint32_t newRefrenceCount = 1;
+#endif
+            do {
+                refrenceCount = atomic_load(&(container->refrenceCount));
+                if (refrenceCount != 0) {
+                    setInitFlagResult = 0;
+                    break;
+                }
+            } while(!CPCASSetFast64(&(container->refrenceCount), refrenceCount, newRefrenceCount));
+            
+            if (setInitFlagResult >= 1) {
+                bitIndex = i;
+                break;
+            }
+        }
+    }
+    if (bitIndex < 0) {
+        CPRelease(logger);
+        return 1;
+    }
+    uint64_t mask = activeMask << bitIndex;
+    uint64_t newFlags = flags;
+    
+    do {
+        flags = CPGetFast64(&(manager->loggerFlags));
+        
+#if DEBUG
+        if ((flags & (~mask)) != flags) {
+            abort();
+        }
+#endif
+        
+        newFlags = flags | mask;
+    } while(!CPCASSetFast64(&(manager->loggerFlags), flags, newFlags));
+    
+    uintptr_t obj = (uintptr_t)logger;
+    
+    CPMemoryManagerLoggerContainer_s * container = &(manager->loggerItems[bitIndex]);
+    atomic_store(&(container->logger), obj);
+    CPMemoryBarrier();
+    atomic_store(&(container->refrenceCount), 2);
+    *keyRef = bitIndex + 1;
+    return 0;
+}
+int CPMemoryLoggerManagerRemoveLogger(CPMemoryLoggerManager_s * _Nonnull manager, uint32_t key) {
     assert(manager);
     
-    if (key <= 0 || key > 64) {
+    if (key == 0 || key > 64) {
         return -1;
     }
     uint32_t index = (uint32_t)(key - 1);
@@ -268,13 +339,12 @@ int CPMemoryManagerRemoveLogger(CPMemoryManager_t * _Nonnull manager, int key) {
         flags = CPGetFast64(&(manager->loggerFlags));
         
         if ((flags & mask) != mask) {
-            return -1;
+            return 1;
         }
-        
-        newFlags = flags & (~mask);;
+        newFlags = flags & (~mask);
     } while(!CPCASSetFast64(&(manager->loggerFlags), flags, newFlags));
     
-    return CPMemoryManagerLoggerRelease(manager, index);
+    return CPMemoryLoggerRelease(manager, index);
 }
 
 
@@ -373,17 +443,21 @@ CPAllocResult_s const CPAlloc(struct __CPAlloctor const * _Nonnull alloctor, CPT
         result.infoStorage = (CPInfoStorage_s *)((uint8_t *)result.ptr + customInfoSize);
         result.obj = ((uint8_t *)result.ptr + customInfoSize + CPInfoStoreSize);
     }
-    if (flag.action == 1) {
-        //log malloc
-        
-        
-    }
-    
     if (customInfoSize > 0) {
         result.customInfoSize = customInfoSize;
         result.customInfo = result.ptr;
     }
     CPInfoStorageStoreType(result.infoStorage, type);
+    
+    
+    CPMemoryLogItem_s item = {};
+    item.ptrAddress = (uintptr_t)(result.ptr);
+    item.size = result.size;
+    item.alloctor = alloctor;
+    item.type = type;
+    item.action = flag.action;
+    item.code = flag.code;
+    CPAlloctorLog(alloctor, &item);
     return result;
 }
 void * _Nonnull CPInit(struct __CPAlloctor const * _Nonnull alloctor, CPAllocResult_s * _Nonnull allocedInfo, _Bool autoDealloc, _Bool isStatic) {
@@ -483,12 +557,14 @@ void CPDealloc(struct __CPAlloctor const * _Nonnull alloctor, CPObject _Nonnull 
     CPType_s * type = CPGetType(info);
     CPMemoryFlag_s flag = alloctor->memoryDealloc(alloctor, m.ptr, m.size);
     
-    if (flag.action == 1) {
-        //log free
-        
-        
-        
-    }
+    CPMemoryLogItem_s item = {};
+    item.ptrAddress = (uintptr_t)(m.ptr);
+    item.size = m.size;
+    item.alloctor = alloctor;
+    item.type = type;
+    item.action = flag.action;
+    item.code = flag.code;
+    CPAlloctorLog(alloctor, &item);
     CPRelease(type);
 }
 

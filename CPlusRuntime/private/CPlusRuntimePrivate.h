@@ -14,72 +14,11 @@
 #include <pthread/pthread.h>
 
 
-typedef struct {
-    uintptr_t ptrAddress;
-    size_t size;
-    CPType _Nonnull type;
-    uint32_t source: 8;
-    uint32_t code: 24;
-} CPMemoryLogItem_s;
-
-
-typedef struct __CPMemoryManagerLoggerContainer {
-#if CPTARGET_RT_64_BIT
-    _Atomic(uint_fast64_t) refrenceCount;
-#else
-    _Atomic(uint_fast32_t) refrenceCount;
-#endif
-    _Atomic(uintptr_t) logger;
-} CPMemoryManagerLoggerContainer_s;
-
-typedef struct __CPMemoryLoggerManager {
-    _Atomic(uint_fast64_t) loggerFlags;
-    CPMemoryManagerLoggerContainer_s loggerItems[64];
-} CPMemoryLoggerManager_s;
-
-
-typedef void (* CPMemoryManagerLogFunc)(CPMemoryLogItem_s item);
-
-typedef struct {
-    void * _Nullable context;
-    void (* _Nullable contextRelease)(void * _Nonnull context);//context 非空时调用
-
-    CPMemoryManagerLogFunc _Nonnull logFunc;
-    uint32_t const contentSize;
-} CPMemoryLogger_o;
-
-typedef CPMemoryLogger_o const * CPMemoryLoggerRef;
-
-void CPMemoryManagerLoggerDeinit(void const * _Nonnull object);
-
-static CPTypeLayout_s const CPTypeStorage_CPMemoryManagerLogger = {
-    .info = CPInfoDefaultTypeInfo,
-    .type = {
-        .base = {
-            .isImmutable = 1,
-            .domain = CCTypeDomain,
-            .contentHasPadding = 0,
-            .customInfoSize = 0,
-            .contentBaseSize = sizeof(CPMemoryLogger_o),
-            .name = "CPlus.MemoryLogger",
-            .superType = NULL,
-            .alloctor = NULL,
-            .deinit = CPMemoryManagerLoggerDeinit,
-        },
-        .callbacks = NULL,
-        .context = NULL,
-    },
-};
-
-
-
 typedef struct __CPMemoryManager {
     _Atomic(uint_fast64_t) ptrCount;
     _Atomic(uint_fast64_t) usedMemory;
     void (* _Nullable zeroSizeErrorHandler)(struct __CPMemoryManager * _Nonnull manager, void * _Nonnull * _Nullable ptr);
     void (* _Nullable oomHandler)(struct __CPMemoryManager * _Nonnull manager, size_t size);
-    _Atomic(uint_fast64_t) loggerFlags;
-    CPMemoryManagerLoggerContainer_s loggerItems[64];
 } CPMemoryManager_t;
 
 static CPMemoryManager_t __CPMemoryManagerDefault = {};

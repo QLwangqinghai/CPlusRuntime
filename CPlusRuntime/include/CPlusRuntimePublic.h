@@ -672,6 +672,14 @@ CPInfoStorage_s * _Nonnull CPGetInfo(void const * _Nonnull obj);
 
 
 
+typedef enum {
+    CPMemoryFlagActionUnknown = 0,
+    CPMemoryFlagActionSystemMalloc = 1,
+    CPMemoryFlagActionAlloctorAllocFromCache = 2,
+    CPMemoryFlagActionSystemFree = 3,
+    CPMemoryFlagActionAlloctorDeallocStoreToCache = 4,
+} CPMemoryFlagAction_e;
+
 typedef struct __CPMemoryFlag {
     uint32_t action: 8;//0 for unknown, 1 for call malloc(size_t), 2. alloc form alloctor cache, 3. free 4. free by store to alloctor cache
     uint32_t code: 24;
@@ -693,10 +701,27 @@ typedef struct {
     size_t size;
 } CPAllocResult_s;
 
+
+
+
+typedef struct __CPMemoryManagerLoggerContainer {
+#if CPTARGET_RT_64_BIT
+    _Atomic(uint_fast64_t) refrenceCount;
+#else
+    _Atomic(uint_fast32_t) refrenceCount;
+#endif
+    _Atomic(uintptr_t) logger;
+} CPMemoryManagerLoggerContainer_s;
+
+typedef struct __CPMemoryLoggerManager {
+    _Atomic(uint_fast64_t) loggerFlags;
+    CPMemoryManagerLoggerContainer_s loggerItems[64];
+} CPMemoryLoggerManager_s;
+
 typedef struct __CPAlloctor {
     //memory
-    CPAllocedMemory_s (* _Nonnull memoryAlloc)(struct __CPAlloctor const * _Nonnull alloctor, size_t size);
-    CPMemoryFlag_s (* _Nonnull memoryDealloc)(struct __CPAlloctor const * _Nonnull alloctor, void * _Nonnull ptr, size_t size);
+    CPAllocedMemory_s const (* _Nonnull memoryAlloc)(struct __CPAlloctor const * _Nonnull alloctor, size_t size);
+    CPMemoryFlag_s const (* _Nonnull memoryDealloc)(struct __CPAlloctor const * _Nonnull alloctor, void * _Nonnull ptr, size_t size);
     
     
     CPAllocResult_s const (* _Nonnull alloc)(struct __CPAlloctor const * _Nonnull alloctor, CPType _Nonnull type, size_t contentPaddingSize);
@@ -831,8 +856,63 @@ __attribute__((constructor(201)))
 void CPlusModuleInit(void);
 
 
-/********************************* weak support *********************************/
+/********************************* memory logger *********************************/
 
+typedef struct {
+    uintptr_t ptrAddress;
+    size_t size;
+    CPAlloctor_s const * _Nonnull alloctor;
+    CPType _Nonnull type;
+    uint32_t action: 8;
+    uint32_t code: 24;
+} CPMemoryLogItem_s;
+
+typedef struct __CPMemoryLogger {
+    void * _Nullable context;
+    void (* _Nullable contextRelease)(void * _Nonnull context);//context 非空时调用
+    
+    void (* _Nullable logFunc)(struct __CPMemoryLogger * _Nonnull self, CPMemoryLogItem_s const * _Nonnull item);
+    uint32_t const contentSize;
+} CPMemoryLogger_o;
+
+typedef void (* CPMemoryManagerLogFunc)(struct __CPMemoryLogger * _Nonnull self, CPMemoryLogItem_s const * _Nonnull item);
+
+typedef CPMemoryLogger_o const * CPMemoryLoggerRef;
+
+CPMemoryLogger_o * _Nonnull CPMemoryLoggerAllocInit(void * _Nullable context,
+                             void (* _Nullable contextRelease)(void * _Nonnull context),
+                             CPMemoryManagerLogFunc _Nullable logFunc);
+
+void CPMemoryLoggerDeinit(void const * _Nonnull object);
+
+static CPTypeLayout_s const CPTypeStorage_CPMemoryLogger = {
+    .info = CPInfoDefaultTypeInfo,
+    .type = {
+        .base = {
+            .isImmutable = 1,
+            .domain = CCTypeDomain,
+            .contentHasPadding = 0,
+            .customInfoSize = 0,
+            .contentBaseSize = sizeof(CPMemoryLogger_o),
+            .name = "CPlus.MemoryLogger",
+            .superType = NULL,
+            .alloctor = NULL,
+            .deinit = CPMemoryLoggerDeinit,
+        },
+        .callbacks = NULL,
+        .context = NULL,
+    },
+};
+
+static CPType _Nonnull const CPType_CPMemoryLogger = &(CPTypeStorage_CPMemoryLogger.type);
+
+
+int CPAlloctorDefaultAddLogger(CPMemoryLoggerRef _Nonnull logger, uint32_t * _Nonnull keyRef);
+int CPAlloctorAddLogger(CPAlloctor_s * _Nonnull alloctor, CPMemoryLoggerRef _Nonnull logger, uint32_t * _Nonnull keyRef);
+
+
+
+/********************************* weak support *********************************/
 //typedef struct _CCWeakContainerFlag {
 //    uint32_t useFlag;
 //} CCWeakContainerFlag_t;
